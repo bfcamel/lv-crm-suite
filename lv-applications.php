@@ -1328,13 +1328,19 @@ final class LV_Applications_Plugin {
     }
 
     public static function ensure_private_storage() {
-        $dir = self::private_storage_dir();
-        if ( ! is_dir( $dir ) && ! wp_mkdir_p( $dir ) ) return false;
-        if ( ! is_dir( $dir ) || ! is_writable( $dir ) ) return false;
-        if ( ! file_exists( $dir . '/index.php' ) ) @file_put_contents( $dir . '/index.php', "<?php\n// Silence is golden.\n" );
-        if ( ! file_exists( $dir . '/.htaccess' ) ) @file_put_contents( $dir . '/.htaccess', "Deny from all\n" );
-        if ( ! file_exists( $dir . '/web.config' ) ) @file_put_contents( $dir . '/web.config', '<?xml version="1.0"?><configuration><system.webServer><authorization><deny users="*" /></authorization></system.webServer></configuration>' );
-        return true;
+        // Prefer storage outside the ordinary web root. Some shared hosts do not
+        // allow WordPress to create sibling directories, so retain the hardened
+        // legacy wp-content directory as a compatibility fallback instead of
+        // silently losing uploaded files.
+        foreach ( array_unique( array( self::private_storage_dir(), self::legacy_private_storage_dir() ) ) as $dir ) {
+            if ( ! is_dir( $dir ) && ! wp_mkdir_p( $dir ) ) continue;
+            if ( ! is_dir( $dir ) || ! is_writable( $dir ) ) continue;
+            if ( ! file_exists( $dir . '/index.php' ) ) @file_put_contents( $dir . '/index.php', "<?php\n// Silence is golden.\n" );
+            if ( ! file_exists( $dir . '/.htaccess' ) ) @file_put_contents( $dir . '/.htaccess', "Deny from all\n" );
+            if ( ! file_exists( $dir . '/web.config' ) ) @file_put_contents( $dir . '/web.config', '<?xml version="1.0"?><configuration><system.webServer><authorization><deny users="*" /></authorization></system.webServer></configuration>' );
+            return $dir;
+        }
+        return '';
     }
 
     private static function stored_file_path( $application_id, $stored_name ) {
@@ -1348,8 +1354,8 @@ final class LV_Applications_Plugin {
     }
 
     public static function persist_uploaded_files( $application_id, $uploaded_files ) {
-        if ( ! self::ensure_private_storage() ) return array();
-        $base = self::private_storage_dir();
+        $base = self::ensure_private_storage();
+        if ( ! $base ) return array();
         $app_dir = $base . '/' . absint( $application_id );
         if ( ! is_dir( $app_dir ) && ! wp_mkdir_p( $app_dir ) ) return array();
         $result = array();

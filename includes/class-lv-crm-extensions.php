@@ -1036,7 +1036,11 @@ final class LV_CRM_Extensions {
         if(class_exists('LV_Request_Cache'))LV_Request_Cache::set($key,$rows);
         return$rows;
     }
-    public static function linked_applications($contact_id){global$wpdb;return$wpdb->get_results($wpdb->prepare('SELECT a.*,l.relation_type,l.is_primary FROM '.LV_Applications_Plugin::table_name().' a INNER JOIN '.self::application_contacts_table().' l ON l.application_id=a.id WHERE l.contact_id=%d ORDER BY a.submitted_at DESC,a.id DESC',absint($contact_id)));}
+    public static function linked_applications($contact_id){
+        global$wpdb;$contact_id=absint($contact_id);$where='l.contact_id=%d';$args=array($contact_id);
+        if(!LV_Applications_Plugin::is_manager()){$where.=' AND a.deleted_at IS NULL AND (a.assignee_id=0 OR a.assignee_id=%d)';$args[]=get_current_user_id();}
+        return$wpdb->get_results($wpdb->prepare('SELECT a.*,l.relation_type,l.is_primary FROM '.LV_Applications_Plugin::table_name().' a INNER JOIN '.self::application_contacts_table()." l ON l.application_id=a.id WHERE {$where} ORDER BY a.submitted_at DESC,a.id DESC",$args));
+    }
     public static function contact_url($id,$return_to=''){$args=array('page'=>self::CONTACTS_SLUG,'action'=>'view','contact_id'=>absint($id));$safe=self::safe_admin_return_url($return_to);if($safe)$args['return_to']=$safe;return add_query_arg($args,admin_url('admin.php'));}
     private static function safe_admin_return_url($url){$url=esc_url_raw((string)$url);if(!$url)return'';$admin=admin_url();return 0===strpos($url,$admin)?$url:'';}
     private static function contact_list_url($filters=array(),$page=1,$per_page=0){$args=LV_Contact_Query::query_args_from_filters($filters);$args['page']=self::CONTACTS_SLUG;if($page>1)$args['paged']=absint($page);if($per_page)$args['per_page']=absint($per_page);return add_query_arg($args,admin_url('admin.php'));}
