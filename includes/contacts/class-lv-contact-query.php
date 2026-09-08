@@ -78,6 +78,7 @@ final class LV_Contact_Query {
         $out['segment_id'] = absint( $input['segment_id'] ?? ( $input['segment'] ?? 0 ) );
         $view = sanitize_key( $input['view'] ?? 'active' );
         $out['view'] = in_array( $view, array( 'active', 'trash' ), true ) ? $view : 'active';
+        if ( ! LV_Applications_Plugin::is_manager() ) $out['view'] = 'active';
         $orderby = sanitize_key( $input['orderby'] ?? 'updated' );
         $out['orderby'] = in_array( $orderby, array( 'updated', 'name', 'curator', 'applications', 'last_application' ), true ) ? $orderby : 'updated';
         $out['order'] = isset( $input['order'] ) && 'asc' === strtolower( sanitize_key( (string) $input['order'] ) ) ? 'ASC' : 'DESC';
@@ -110,6 +111,16 @@ final class LV_Contact_Query {
         $params = array();
         $f = $this->filters;
         $where[] = ( 'trash' === $f['view'] ) ? 'c.deleted_at IS NOT NULL' : 'c.deleted_at IS NULL';
+
+        // Editors/administrators are managers and may work with the whole CRM.
+        // Authors/contributors only see contacts they created/curate or contacts
+        // linked to applications that are currently visible to them.
+        if ( ! LV_Applications_Plugin::is_manager() ) {
+            $uid = get_current_user_id();
+            $apps = LV_Applications_Plugin::table_name();
+            $where[] = "(c.created_by=%d OR c.curator_user_id=%d OR EXISTS (SELECT 1 FROM {$links} acl_l INNER JOIN {$apps} acl_a ON acl_a.id=acl_l.application_id WHERE acl_l.contact_id=c.id AND acl_a.deleted_at IS NULL AND (acl_a.assignee_id=0 OR acl_a.assignee_id=%d)))";
+            array_push( $params, $uid, $uid, $uid );
+        }
 
         if ( $f['search'] ) {
             $like = '%' . $wpdb->esc_like( $f['search'] ) . '%';

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Люди и Верблюды — CRM фонда
  * Description: CRM фонда на базе Contact Form 7: заявки, умное распределение, контакты, кураторы, метки, история и экспорт.
- * Version: 0.11.2
+ * Version: 0.11.3
  * Author: БФ «Люди и Верблюды»
  * Requires at least: 6.2
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'LV_APPS_VERSION', '0.11.2' );
+define( 'LV_APPS_VERSION', '0.11.3' );
 define( 'LV_APPS_FILE', __FILE__ );
 define( 'LV_APPS_DIR', plugin_dir_path( __FILE__ ) );
 define( 'LV_APPS_URL', plugin_dir_url( __FILE__ ) );
@@ -1313,22 +1313,42 @@ final class LV_Applications_Plugin {
         return $html . '</div>';
     }
 
-    public static function private_storage_dir() {
+    public static function legacy_private_storage_dir() {
         return WP_CONTENT_DIR . '/lv-applications-private';
+    }
+
+    public static function private_storage_dir() {
+        // One level above the WordPress installation parent keeps static files
+        // outside the usual document root on Apache, Nginx and IIS deployments.
+        $parent = dirname( dirname( untrailingslashit( WP_CONTENT_DIR ) ) );
+        $site_key = substr( hash( 'sha256', untrailingslashit( ABSPATH ) ), 0, 12 );
+        $default = trailingslashit( $parent ) . 'lv-applications-private-' . $site_key;
+        $dir = (string) apply_filters( 'lv_applications_private_storage_dir', $default );
+        return untrailingslashit( wp_normalize_path( $dir ) );
     }
 
     public static function ensure_private_storage() {
         $dir = self::private_storage_dir();
-        if ( ! is_dir( $dir ) ) wp_mkdir_p( $dir );
-        if ( is_dir( $dir ) ) {
-            if ( ! file_exists( $dir . '/index.php' ) ) @file_put_contents( $dir . '/index.php', "<?php\n// Silence is golden.\n" );
-            if ( ! file_exists( $dir . '/.htaccess' ) ) @file_put_contents( $dir . '/.htaccess', "Deny from all\n" );
-            if ( ! file_exists( $dir . '/web.config' ) ) @file_put_contents( $dir . '/web.config', '<?xml version="1.0"?><configuration><system.webServer><authorization><deny users="*" /></authorization></system.webServer></configuration>' );
+        if ( ! is_dir( $dir ) && ! wp_mkdir_p( $dir ) ) return false;
+        if ( ! is_dir( $dir ) || ! is_writable( $dir ) ) return false;
+        if ( ! file_exists( $dir . '/index.php' ) ) @file_put_contents( $dir . '/index.php', "<?php\n// Silence is golden.\n" );
+        if ( ! file_exists( $dir . '/.htaccess' ) ) @file_put_contents( $dir . '/.htaccess', "Deny from all\n" );
+        if ( ! file_exists( $dir . '/web.config' ) ) @file_put_contents( $dir . '/web.config', '<?xml version="1.0"?><configuration><system.webServer><authorization><deny users="*" /></authorization></system.webServer></configuration>' );
+        return true;
+    }
+
+    private static function stored_file_path( $application_id, $stored_name ) {
+        $application_id = absint( $application_id );
+        $stored_name = wp_basename( (string) $stored_name );
+        foreach ( array_unique( array( self::private_storage_dir(), self::legacy_private_storage_dir() ) ) as $base ) {
+            $path = $base . '/' . $application_id . '/' . $stored_name;
+            if ( is_file( $path ) && is_readable( $path ) ) return $path;
         }
+        return '';
     }
 
     public static function persist_uploaded_files( $application_id, $uploaded_files ) {
-        self::ensure_private_storage();
+        if ( ! self::ensure_private_storage() ) return array();
         $base = self::private_storage_dir();
         $app_dir = $base . '/' . absint( $application_id );
         if ( ! is_dir( $app_dir ) && ! wp_mkdir_p( $app_dir ) ) return array();
@@ -1401,8 +1421,8 @@ final class LV_Applications_Plugin {
         $files = self::decode_files( $app );
         if ( ! isset( $files[ $index ]['stored_name'] ) ) wp_die( 'Файл не найден.' );
         $stored = wp_basename( $files[ $index ]['stored_name'] );
-        $path = self::private_storage_dir() . '/' . $id . '/' . $stored;
-        if ( ! is_file( $path ) || ! is_readable( $path ) ) wp_die( 'Файл не найден на сервере.' );
+        $path = self::stored_file_path( $id, $stored );
+        if ( ! $path ) wp_die( 'Файл не найден на сервере.' );
         while ( ob_get_level() ) ob_end_clean();
         nocache_headers();
         header( 'Content-Type: ' . ( ! empty( $files[$index]['mime'] ) ? $files[$index]['mime'] : 'application/octet-stream' ) );
@@ -1413,10 +1433,12 @@ final class LV_Applications_Plugin {
     }
 
     private static function delete_application_files( $app ) {
-        $dir = self::private_storage_dir() . '/' . absint( $app->id );
-        if ( is_dir( $dir ) ) {
-            foreach ( glob( $dir . '/*' ) ?: array() as $file ) if ( is_file( $file ) ) @unlink( $file );
-            @rmdir( $dir );
+        foreach ( array_unique( array( self::private_storage_dir(), self::legacy_private_storage_dir() ) ) as $base ) {
+            $dir = $base . '/' . absint( $app->id );
+            if ( is_dir( $dir ) ) {
+                foreach ( glob( $dir . '/*' ) ?: array() as $file ) if ( is_file( $file ) ) @unlink( $file );
+                @rmdir( $dir );
+            }
         }
     }
 
@@ -1734,7 +1756,7 @@ final class LV_Applications_Plugin {
         $this->render_workspace_nav( $filters, 'dashboard' );
 
         global $wpdb;
-        $contacts_total = class_exists( 'LV_CRM_Extensions' ) ? (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . LV_CRM_Extensions::contacts_table() ) : 0;
+        $contacts_total = class_exists( 'LV_Contact_Query' ) ? ( new LV_Contact_Query( array( 'view' => 'active' ) ) )->count() : 0;
         $contacts_mine = class_exists( 'LV_CRM_Extensions' ) ? (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . LV_CRM_Extensions::contacts_table() . ' WHERE curator_user_id = %d', get_current_user_id() ) ) : 0;
         $routing_enabled = ( self::is_manager() && class_exists( 'LV_CRM_Extensions' ) ) ? (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . LV_CRM_Extensions::routing_rules_table() . ' WHERE enabled = 1' ) : 0;
 
@@ -2669,6 +2691,16 @@ final class LV_Applications_Plugin {
         return iterator_to_array( $this->export_rows_unified_iter( $apps, $mode, $selected_fields, $include_meta ), false );
     }
 
+    private static function sanitize_export_cell( $value ) {
+        if ( is_bool( $value ) ) $value = $value ? 'Да' : 'Нет';
+        if ( is_array( $value ) ) $value = implode( ', ', array_map( 'strval', $value ) );
+        $value = (string) $value;
+        // Keep ordinary international phone numbers readable, while neutralising
+        // cells that spreadsheet applications could evaluate as formulas.
+        if ( preg_match( '/^[=+\-@]/u', $value ) && ! preg_match( '/^\+[0-9\s()\-]+$/u', $value ) ) $value = "'" . $value;
+        return $value;
+    }
+
     private function download_csv( $filename, $rows ) {
         while ( ob_get_level() ) ob_end_clean();
         nocache_headers();
@@ -2676,7 +2708,7 @@ final class LV_Applications_Plugin {
         header( 'Content-Disposition: attachment; filename="' . sanitize_file_name( $filename ) . '"' );
         echo "\xEF\xBB\xBF";
         $out = fopen( 'php://output', 'w' );
-        foreach ( $rows as $row ) fputcsv( $out, $row, ';' );
+        foreach ( $rows as $row ) fputcsv( $out, array_map( array( __CLASS__, 'sanitize_export_cell' ), $row ), ';' );
         fclose( $out );
         exit;
     }
