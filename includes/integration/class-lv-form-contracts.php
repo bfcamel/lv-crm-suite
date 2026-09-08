@@ -39,7 +39,7 @@ final class LV_Form_Contracts {
                 'code' => 'volunteer_application',
                 'title' => 'Волонтёр',
                 'schema_version' => '1',
-                'required' => array( 'contact_name', 'volunteer_age', 'contact_email', 'consent_personal_data' ),
+                'required' => array( 'contact_name', 'contact_phone', 'volunteer_age', 'contact_email', 'consent_personal_data' ),
                 'contact_fields' => array(
                     'contact_location' => array( 'label' => 'Город / регион', 'type' => 'text' ),
                     'volunteer_age' => array( 'label' => 'Возраст', 'type' => 'number' ),

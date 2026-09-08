@@ -749,7 +749,19 @@ final class LV_CRM_Extensions {
     // ----------------------------- Contacts -----------------------------
     public static function can_view_contacts(){return current_user_can('lv_view_applications');}
     public static function is_contact_deleted($contact){return $contact&&!empty($contact->deleted_at);}
-    public static function can_edit_contact($contact){if(!$contact||!self::can_view_contacts()||self::is_contact_deleted($contact))return false;if(LV_Applications_Plugin::is_manager())return true;$uid=get_current_user_id();return absint($contact->created_by)===$uid||absint($contact->curator_user_id)===$uid;}
+    public static function can_access_contact($contact){
+        if(!$contact||!self::can_view_contacts())return false;
+        if(LV_Applications_Plugin::is_manager())return true;
+        if(self::is_contact_deleted($contact))return false;
+        $uid=get_current_user_id();
+        if(absint($contact->created_by)===$uid||absint($contact->curator_user_id)===$uid)return true;
+        global$wpdb;
+        return(bool)$wpdb->get_var($wpdb->prepare(
+            'SELECT 1 FROM '.self::application_contacts_table().' l INNER JOIN '.LV_Applications_Plugin::table_name().' a ON a.id=l.application_id WHERE l.contact_id=%d AND a.deleted_at IS NULL AND (a.assignee_id=0 OR a.assignee_id=%d) LIMIT 1',
+            absint($contact->id),$uid
+        ));
+    }
+    public static function can_edit_contact($contact){if(!$contact||!self::can_access_contact($contact)||self::is_contact_deleted($contact))return false;if(LV_Applications_Plugin::is_manager())return true;$uid=get_current_user_id();return absint($contact->created_by)===$uid||absint($contact->curator_user_id)===$uid;}
     public static function can_trash_contact($contact){return $contact&&!self::is_contact_deleted($contact)&&current_user_can('lv_trash_contacts')&&self::can_edit_contact($contact);}
     public static function get_contact($id){global$wpdb;return$wpdb->get_row($wpdb->prepare('SELECT * FROM '.self::contacts_table().' WHERE id=%d',absint($id)));}
     public static function contact_trash_days_left($contact){if(!$contact||empty($contact->deleted_at))return 0;$deadline=strtotime($contact->deleted_at.' +7 days');return max(0,(int)ceil(($deadline-current_time('timestamp'))/DAY_IN_SECONDS));}
@@ -1036,10 +1048,11 @@ final class LV_CRM_Extensions {
         if ( ! $app ) return $out;
         $identity = self::application_identity( $app );
         foreach ( self::contacts_by_identity( $identity['emails'], $identity['phones'] ) as $c ) {
+            if ( ! self::can_access_contact( $c ) ) continue;
             $m = self::contact_display_meta( $c );
             $out[] = array( 'type'=>'contact', 'id'=>$c->id, 'name'=>$c->display_name, 'meta'=>$m['phone'] ?: ( $m['email'] ?: 'Совпадение с контактом CRM' ) );
         }
-        foreach ( self::find_wp_users_by_identity( $identity['emails'], $identity['phones'] ) as $uid ) {
+        if ( LV_Applications_Plugin::is_manager() ) foreach ( self::find_wp_users_by_identity( $identity['emails'], $identity['phones'] ) as $uid ) {
             $u = get_userdata( $uid ); if ( ! $u ) continue;
             global $wpdb;
             $cid = absint( $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM '.self::contacts_table().' WHERE deleted_at IS NULL AND linked_wp_user_id=%d LIMIT 1', $uid ) ) );
@@ -1084,16 +1097,16 @@ final class LV_CRM_Extensions {
         $q=sanitize_text_field(wp_unslash($_POST['q']??''));if((function_exists('mb_strlen')?mb_strlen($q,'UTF-8'):strlen($q))<2)wp_send_json_success(array('items'=>array()));
         global$wpdb;$like='%'.$wpdb->esc_like($q).'%';$digits=self::normalize_phone($q);
         $sql='SELECT DISTINCT c.* FROM '.self::contacts_table().' c LEFT JOIN '.self::contact_emails_table().' e ON e.contact_id=c.id LEFT JOIN '.self::contact_phones_table().' p ON p.contact_id=c.id WHERE c.deleted_at IS NULL AND (c.display_name LIKE %s OR c.organization LIKE %s OR e.value LIKE %s'.($digits?' OR p.normalized LIKE %s':'').') ORDER BY c.display_name LIMIT 10';
-        $params=array($like,$like,$like);if($digits)$params[]='%'.$wpdb->esc_like($digits).'%';$rows=$wpdb->get_results($wpdb->prepare($sql,$params));$rows=LV_Contact_Query::hydrate_rows($rows);$items=array();$linkedUsers=array();
+        $params=array($like,$like,$like);if($digits)$params[]='%'.$wpdb->esc_like($digits).'%';$rows=$wpdb->get_results($wpdb->prepare($sql,$params));$rows=LV_Contact_Query::hydrate_rows($rows);if(!LV_Applications_Plugin::is_manager())$rows=array_values(array_filter($rows,array(__CLASS__,'can_access_contact')));$items=array();$linkedUsers=array();
         foreach($rows as$c){$phone=!empty($c->lv_phones[0]->value)?$c->lv_phones[0]->value:'';$email=!empty($c->lv_emails[0]->value)?$c->lv_emails[0]->value:'';$items[]=array('type'=>'contact','id'=>$c->id,'name'=>$c->display_name,'meta'=>($phone ? $phone : ($email ? $email : ($c->organization?:'Контакт CRM'))),'badge'=>'Контакт CRM','url'=>self::contact_url($c->id));if($c->linked_wp_user_id)$linkedUsers[]=absint($c->linked_wp_user_id);}
-        foreach(self::search_wp_accounts($q,8) as$u){if(in_array(absint($u->ID),$linkedUsers,true))continue;$existingCid=absint($wpdb->get_var($wpdb->prepare('SELECT id FROM '.self::contacts_table().' WHERE deleted_at IS NULL AND linked_wp_user_id=%d LIMIT 1',$u->ID)));if($existingCid){$c=self::get_contact($existingCid);if($c){$hydrated=LV_Contact_Query::hydrate_rows(array($c));$c=$hydrated?$hydrated[0]:$c;$phone=!empty($c->lv_phones[0]->value)?$c->lv_phones[0]->value:'';$email=!empty($c->lv_emails[0]->value)?$c->lv_emails[0]->value:'';$items[]=array('type'=>'contact','id'=>$c->id,'name'=>$c->display_name,'meta'=>$phone?:($email?:'Связан с аккаунтом WordPress'),'badge'=>'Контакт CRM');}continue;}$phones=self::user_phone_values($u->ID);$items[]=array('type'=>'account','id'=>$u->ID,'name'=>self::user_full_name($u),'meta'=>$u->user_email?:($phones?$phones[0]:('@'.$u->user_login)),'badge'=>'Аккаунт WordPress');}
+        if(LV_Applications_Plugin::is_manager())foreach(self::search_wp_accounts($q,8) as$u){if(in_array(absint($u->ID),$linkedUsers,true))continue;$existingCid=absint($wpdb->get_var($wpdb->prepare('SELECT id FROM '.self::contacts_table().' WHERE deleted_at IS NULL AND linked_wp_user_id=%d LIMIT 1',$u->ID)));if($existingCid){$c=self::get_contact($existingCid);if($c){$hydrated=LV_Contact_Query::hydrate_rows(array($c));$c=$hydrated?$hydrated[0]:$c;$phone=!empty($c->lv_phones[0]->value)?$c->lv_phones[0]->value:'';$email=!empty($c->lv_emails[0]->value)?$c->lv_emails[0]->value:'';$items[]=array('type'=>'contact','id'=>$c->id,'name'=>$c->display_name,'meta'=>$phone?:($email?:'Связан с аккаунтом WordPress'),'badge'=>'Контакт CRM');}continue;}$phones=self::user_phone_values($u->ID);$items[]=array('type'=>'account','id'=>$u->ID,'name'=>self::user_full_name($u),'meta'=>$u->user_email?:($phones?$phones[0]:('@'.$u->user_login)),'badge'=>'Аккаунт WordPress');}
         $seen=array();$unique=array();foreach($items as$item){$k=$item['type'].'-'.$item['id'];if(isset($seen[$k]))continue;$seen[$k]=1;$unique[]=$item;if(count($unique)>=16)break;}
         wp_send_json_success(array('items'=>$unique));
     }
 
     public function ajax_link_contact(){
         check_ajax_referer('lv_crm_link_contact','nonce');$aid=absint($_POST['application_id']??0);$cid=absint($_POST['contact_id']??0);$app=LV_Applications_Plugin::get_application($aid);$contact=self::get_contact($cid);
-        if(!$app||!$contact||!LV_Applications_Plugin::can_edit_application($app))wp_send_json_error(array('message'=>'Недостаточно прав.'),403);
+        if(!$app||!$contact||!LV_Applications_Plugin::can_edit_application($app)||!self::can_access_contact($contact))wp_send_json_error(array('message'=>'Недостаточно прав.'),403);
         self::link_application_to_contact($aid,$cid,get_current_user_id(),'manual');
         wp_send_json_success(array('html'=>self::application_contacts_panel(LV_Applications_Plugin::get_application($aid),true)));
     }
@@ -1124,10 +1137,10 @@ final class LV_CRM_Extensions {
         $request=array_merge($base,(array)$_GET);$request['segment_id']=$segment_id;
         $filters=LV_Contact_Query::sanitize_filters($request);$view=$filters['view'];$trash_view='trash'===$view;$query=new LV_Contact_Query($filters);
         $page=max(1,absint($_GET['paged']??1));$allowed_per=array(25,50,100);$requested_per=absint($_GET['per_page']??0);if(in_array($requested_per,$allowed_per,true)){update_user_meta(get_current_user_id(),'lv_crm_contacts_per_page',$requested_per);$per=$requested_per;}else{$saved_per=absint(get_user_meta(get_current_user_id(),'lv_crm_contacts_per_page',true));$per=in_array($saved_per,$allowed_per,true)?$saved_per:25;}$count=$query->count();$max_page=max(1,(int)ceil($count/$per));if($page>$max_page)$page=$max_page;$rows=$query->get($per,($page-1)*$per);
-        $all_count=(int)$wpdb->get_var('SELECT COUNT(*) FROM '.self::contacts_table().' WHERE deleted_at IS NULL');
-        $trash_count=(int)$wpdb->get_var('SELECT COUNT(*) FROM '.self::contacts_table().' WHERE deleted_at IS NOT NULL');
-        $mine_count=(int)$wpdb->get_var($wpdb->prepare('SELECT COUNT(*) FROM '.self::contacts_table().' WHERE deleted_at IS NULL AND curator_user_id=%d',get_current_user_id()));
-        $uncurated=(int)$wpdb->get_var('SELECT COUNT(*) FROM '.self::contacts_table().' WHERE deleted_at IS NULL AND curator_user_id=0');
+        $all_count=(new LV_Contact_Query(array('view'=>'active')))->count();
+        $trash_count=LV_Applications_Plugin::is_manager()?(new LV_Contact_Query(array('view'=>'trash')))->count():0;
+        $mine_count=(new LV_Contact_Query(array('view'=>'active','curator'=>'mine')))->count();
+        $uncurated=(new LV_Contact_Query(array('view'=>'active','curator'=>'none')))->count();
         $segments=LV_Contact_Segments::available();$tags=self::get_tags('contact');$segment_name=$segment?$segment->name:'';
         $advancedActive=$filters['email_state']||$filters['phone_state']||$filters['consent_status']||$filters['created_from']||$filters['created_to']||$filters['updated_from']||$filters['updated_to']||$filters['has_applications']||''!==(string)$filters['applications_min']||''!==(string)$filters['applications_max'];
         $chips=array();if($filters['search'])$chips[]='Поиск: '.$filters['search'];foreach($filters['types'] as$tp)$chips[]=$tp==='organization'?'Организации':'Люди';if($filters['curator']==='mine')$chips[]='Я куратор';elseif($filters['curator']==='none')$chips[]='Без куратора';elseif(ctype_digit((string)$filters['curator']))$chips[]='Куратор: '.LV_Applications_Plugin::assignee_name($filters['curator']);$tagNames=array();foreach($tags as$t)$tagNames[(int)$t->id]=$t->name;foreach($filters['tags_include'] as$tid)if(isset($tagNames[$tid]))$chips[]='Метка: '.$tagNames[$tid];foreach($filters['tags_exclude'] as$tid)if(isset($tagNames[$tid]))$chips[]='Без метки: '.$tagNames[$tid];$emailLabels=array('has'=>'есть','none'=>'нет','valid'=>'корректный','multiple'=>'несколько');$phoneLabels=array('has'=>'есть','none'=>'нет');if($filters['email_state'])$chips[]='Email: '.($emailLabels[$filters['email_state']]??$filters['email_state']);if($filters['phone_state'])$chips[]='Телефон: '.($phoneLabels[$filters['phone_state']]??$filters['phone_state']);if($filters['consent_status'])$chips[]='Согласие: '.(LV_Consent_Service::status_options()[$filters['consent_status']]??$filters['consent_status']);
@@ -1219,7 +1232,7 @@ final class LV_CRM_Extensions {
 
     private function render_contact_editor(){
         $id=absint($_GET['contact_id']??0);$contact=$id?self::get_contact($id):null;$from=absint($_GET['from_application']??0);$editing=(bool)$contact;
-        if($id&&!$contact)wp_die('Контакт не найден.');if($editing&&!self::can_view_contacts())wp_die('Недостаточно прав.');
+        if($id&&!$contact)wp_die('Контакт не найден.');if($editing&&!self::can_access_contact($contact))wp_die('Недостаточно прав.');
         $deleted=$editing&&self::is_contact_deleted($contact);$canEdit=!$editing||(!$deleted&&self::can_edit_contact($contact));$pref=self::prefill_from_application($from);
         $emails=$editing?self::contact_emails($id):array();$phones=$editing?self::contact_phones($id):array();$fields=$editing?self::contact_fields($id):array();$tags=$editing?self::get_contact_tags($id):array();
         $linked=$editing?self::linked_applications($id):array();$logs=$editing?self::contact_logs($id):array();$notes=$editing?self::contact_notes($id):array();

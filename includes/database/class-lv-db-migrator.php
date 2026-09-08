@@ -6,7 +6,7 @@ if ( ! defined( 'ABSPATH' ) ) { exit; }
  * in the admin/activation context, never on a normal front-end request.
  */
 final class LV_DB_Migrator {
-    const PATCH_VERSION = '0.11.2';
+    const PATCH_VERSION = '0.11.3';
     const PATCH_OPTION  = 'lv_crm_patch_version';
     const ACL_VERSION   = '3';
     const ACL_OPTION    = 'lv_crm_acl_version';

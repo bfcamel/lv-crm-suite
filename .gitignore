@@ -1,0 +1,4 @@
+
+# Local release artefacts
+dist/
+*.zip
