@@ -1,0 +1,104 @@
+name: Finalize CRM 0.11.3
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply follow-up hardening
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              n = text.count(old)
+              if n != 1:
+                  raise SystemExit(f'{path}: expected exactly one match, got {n}')
+              p.write_text(text.replace(old, new), encoding='utf-8')
+
+          replace(
+              'lv-applications.php',
+              "    public static function ensure_private_storage() {\n"
+              "        $dir = self::private_storage_dir();\n"
+              "        if ( ! is_dir( $dir ) && ! wp_mkdir_p( $dir ) ) return false;\n"
+              "        if ( ! is_dir( $dir ) || ! is_writable( $dir ) ) return false;\n"
+              "        if ( ! file_exists( $dir . '/index.php' ) ) @file_put_contents( $dir . '/index.php', \"<?php\\n// Silence is golden.\\n\" );\n"
+              "        if ( ! file_exists( $dir . '/.htaccess' ) ) @file_put_contents( $dir . '/.htaccess', \"Deny from all\\n\" );\n"
+              "        if ( ! file_exists( $dir . '/web.config' ) ) @file_put_contents( $dir . '/web.config', '<?xml version=\"1.0\"?><configuration><system.webServer><authorization><deny users=\"*\" /></authorization></system.webServer></configuration>' );\n"
+              "        return true;\n"
+              "    }",
+              "    public static function ensure_private_storage() {\n"
+              "        // Prefer storage outside the ordinary web root. Some shared hosts do not\n"
+              "        // allow WordPress to create sibling directories, so retain the hardened\n"
+              "        // legacy wp-content directory as a compatibility fallback instead of\n"
+              "        // silently losing uploaded files.\n"
+              "        foreach ( array_unique( array( self::private_storage_dir(), self::legacy_private_storage_dir() ) ) as $dir ) {\n"
+              "            if ( ! is_dir( $dir ) && ! wp_mkdir_p( $dir ) ) continue;\n"
+              "            if ( ! is_dir( $dir ) || ! is_writable( $dir ) ) continue;\n"
+              "            if ( ! file_exists( $dir . '/index.php' ) ) @file_put_contents( $dir . '/index.php', \"<?php\\n// Silence is golden.\\n\" );\n"
+              "            if ( ! file_exists( $dir . '/.htaccess' ) ) @file_put_contents( $dir . '/.htaccess', \"Deny from all\\n\" );\n"
+              "            if ( ! file_exists( $dir . '/web.config' ) ) @file_put_contents( $dir . '/web.config', '<?xml version=\"1.0\"?><configuration><system.webServer><authorization><deny users=\"*\" /></authorization></system.webServer></configuration>' );\n"
+              "            return $dir;\n"
+              "        }\n"
+              "        return '';\n"
+              "    }"
+          )
+          replace(
+              'lv-applications.php',
+              "        if ( ! self::ensure_private_storage() ) return array();\n        $base = self::private_storage_dir();",
+              "        $base = self::ensure_private_storage();\n        if ( ! $base ) return array();"
+          )
+          replace(
+              'includes/class-lv-crm-extensions.php',
+              "    public static function linked_applications($contact_id){global$wpdb;return$wpdb->get_results($wpdb->prepare('SELECT a.*,l.relation_type,l.is_primary FROM '.LV_Applications_Plugin::table_name().' a INNER JOIN '.self::application_contacts_table().' l ON l.application_id=a.id WHERE l.contact_id=%d ORDER BY a.submitted_at DESC,a.id DESC',absint($contact_id)));}",
+              "    public static function linked_applications($contact_id){\n"
+              "        global$wpdb;$contact_id=absint($contact_id);$where='l.contact_id=%d';$args=array($contact_id);\n"
+              "        if(!LV_Applications_Plugin::is_manager()){$where.=' AND a.deleted_at IS NULL AND (a.assignee_id=0 OR a.assignee_id=%d)';$args[]=get_current_user_id();}\n"
+              "        return$wpdb->get_results($wpdb->prepare('SELECT a.*,l.relation_type,l.is_primary FROM '.LV_Applications_Plugin::table_name().' a INNER JOIN '.self::application_contacts_table().\" l ON l.application_id=a.id WHERE {$where} ORDER BY a.submitted_at DESC,a.id DESC\",$args));\n"
+              "    }"
+          )
+          PY
+
+      - name: PHP syntax check
+        run: find . -type f -name '*.php' -not -path './.git/*' -print0 | xargs -0 -n1 php -l
+
+      - name: Build installable ZIP
+        shell: bash
+        run: |
+          rm -rf /tmp/lv-build
+          mkdir -p /tmp/lv-build/lv-applications
+          cp -R assets includes README.md lv-applications.php /tmp/lv-build/lv-applications/
+          cd /tmp/lv-build
+          zip -qr /tmp/lv-applications-0.11.3.zip lv-applications
+          unzip -t /tmp/lv-applications-0.11.3.zip
+
+      - name: Commit source hardening
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lv-applications.php includes/class-lv-crm-extensions.php
+          git commit -m "Harden CRM 0.11.3 storage fallback and contact history ACL"
+          git push origin HEAD:main
+
+      - name: Upload installable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: lv-applications-0.11.3-final
+          path: /tmp/lv-applications-0.11.3.zip
+          if-no-files-found: error
